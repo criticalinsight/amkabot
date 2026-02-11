@@ -1,48 +1,68 @@
--- The Depot: Source of Truth (Immutable Event Log)
-CREATE TABLE IF NOT EXISTS events (
-    id SERIAL PRIMARY KEY,
-    source TEXT NOT NULL,          -- e.g., 'polymarket'
-    event_type TEXT NOT NULL,      -- e.g., 'market_resolved', 'trade_executed'
-    payload JSONB NOT NULL,
-    recorded_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
+-- Enable Write-Ahead Logging for concurrency
+PRAGMA journal_mode = WAL;
+PRAGMA synchronous = NORMAL;
 
--- PStates: Materialized Views (Snapshots for recovery/cold starts)
+-- Markets Table
 CREATE TABLE IF NOT EXISTS markets (
-    id TEXT PRIMARY KEY,           -- Polymarket ID
+    id TEXT PRIMARY KEY,
+    slug TEXT NOT NULL,
     question TEXT NOT NULL,
-    category TEXT,
-    status TEXT NOT NULL,          -- open, resolved
-    outcome TEXT,
-    resolved_at TIMESTAMP WITH TIME ZONE
+    url TEXT NOT NULL,
+    description TEXT,
+    created_at INTEGER DEFAULT (unixepoch())
 );
 
+-- Price History Table
+CREATE TABLE IF NOT EXISTS prices (
+    market_id TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    price REAL NOT NULL,
+    timestamp INTEGER NOT NULL,
+    FOREIGN KEY(market_id) REFERENCES markets(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_prices_market_ts ON prices(market_id, timestamp);
+
+-- Events Log (Raw Ingestion)
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    created_at INTEGER DEFAULT (unixepoch())
+);
+
+-- Bets / Positions (Graph Edges)
+-- Explicitly linking Traders to Markets for "Who else bet on this?" queries
+CREATE TABLE IF NOT EXISTS bets (
+    trader_id TEXT NOT NULL,
+    market_slug TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    amount REAL NOT NULL,
+    price REAL NOT NULL,
+    timestamp INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_bets_trader ON bets(trader_id);
+CREATE INDEX IF NOT EXISTS idx_bets_market ON bets(market_slug);
+CREATE INDEX IF NOT EXISTS idx_bets_trader_market ON bets(trader_id, market_slug);
+
+-- Trader Stats (Aggregates)
 CREATE TABLE IF NOT EXISTS traders (
     address TEXT PRIMARY KEY,
-    total_pnl NUMERIC DEFAULT 0,
-    total_volume NUMERIC DEFAULT 0,
-    roi NUMERIC DEFAULT 0,
-    brier_score NUMERIC DEFAULT 0,
-    markets_count INTEGER DEFAULT 0,
-    last_updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    total_pnl REAL NOT NULL DEFAULT 0,
+    roi REAL NOT NULL DEFAULT 0,
+    brier_score REAL NOT NULL DEFAULT 0,
+    markets_count INTEGER NOT NULL DEFAULT 0,
+    last_updated_at INTEGER DEFAULT (unixepoch())
 );
 
--- Indexing for performance
-CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);
-CREATE INDEX IF NOT EXISTS idx_traders_roi ON traders(roi DESC);
-CREATE INDEX IF NOT EXISTS idx_markets_category ON markets(category);
-
--- Phase 7: Historical Accuracy & Predictive Snapshots
+-- Trader Daily Snapshots (Time Series)
 CREATE TABLE IF NOT EXISTS trader_snapshots (
-    id SERIAL PRIMARY KEY,
-    address TEXT REFERENCES traders(address),
-    snapshot_date DATE DEFAULT CURRENT_DATE,
-    cumulative_brier NUMERIC,
-    calibration_score NUMERIC,
-    sharpness_score NUMERIC,
-    UNIQUE(address, snapshot_date)
+    address TEXT NOT NULL,
+    snapshot_date TEXT NOT NULL, -- YYYY-MM-DD
+    cumulative_brier REAL NOT NULL,
+    calibration_score REAL NOT NULL,
+    sharpness_score REAL NOT NULL,
+    PRIMARY KEY(address, snapshot_date),
+    FOREIGN KEY(address) REFERENCES traders(address)
 );
-
-CREATE INDEX IF NOT EXISTS idx_snapshots_address ON trader_snapshots(address);
-CREATE INDEX IF NOT EXISTS idx_snapshots_date ON trader_snapshots(snapshot_date);
-CREATE INDEX IF NOT EXISTS idx_snapshots_address_date ON trader_snapshots(address, snapshot_date);

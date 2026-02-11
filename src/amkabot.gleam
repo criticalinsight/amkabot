@@ -7,7 +7,10 @@ import gleam/http/request.{type Request}
 import gleam/io
 import gleam/option.{Some}
 import mist
-import pog
+import amkabot/store
+import amkabot/gleam_store
+import gleamdb
+import gleamdb/fact
 import wisp
 import wisp/wisp_mist
 
@@ -19,18 +22,26 @@ pub fn main() {
   io.println("🚀 Initializing Amkabot - Prediction Market Tracker...")
 
   // Database Configuration
-  let db_config =
-    pog.default_config(process.new_name("amkabot_pool"))
-    |> pog.host("localhost")
-    |> pog.database("amkabot")
-    |> pog.pool_size(10)
+  let assert Ok(store) = store.init("amkabot.db")
+  io.println("✅ SQLite store initialized.")
+  
+  // Initialize GleamDB
+  let assert store.Store(conn) = store
+  let adapter = gleam_store.adapter(conn)
+  let db = gleamdb.new_with_adapter(Some(adapter))
+  let assert Ok(_) = gleamdb.transact(db, [
+    #(fact.EntityId(0), "system/started_at", fact.Int(0)) // Timestamp TODO
+  ])
 
-  let assert Ok(db_started) = pog.start(db_config)
-  let db = db_started.data
-  io.println("✅ Database connection pool established.")
+  // Define Schema
+  let assert Ok(_) = gleamdb.set_schema(db, "bet/id", fact.AttributeConfig(unique: True, component: False))
+  let assert Ok(_) = gleamdb.set_schema(db, "trader/id", fact.AttributeConfig(unique: True, component: False))
+  let assert Ok(_) = gleamdb.set_schema(db, "market/slug", fact.AttributeConfig(unique: True, component: False))
+
+  io.println("✅ GleamDB initialized and connected to SQLite.")
 
   // Start Analytics Engine
-  let assert Ok(stats_started) = stats.start(db)
+  let assert Ok(stats_started) = stats.start(store)
   let stats_aggregator = stats_started.data
   io.println("📊 Analytics engine (PState) initialized.")
 
@@ -59,12 +70,12 @@ pub fn main() {
   process.spawn(fn() { periodic_broadcast(broadcaster_actor) })
 
   // Start Ingestion Topology
-  let assert Ok(ingest_started) = ingestor.start(db, stats_aggregator)
+  let assert Ok(ingest_started) = ingestor.start(store, db, stats_aggregator)
   process.send(ingest_started.data, ingestor.Poll)
   io.println("📡 Ingestion actor started and connected to analytics.")
 
   // Start Web Server with Hybrid Mist/Wisp handler
-  let ctx = web.Context(stats_aggregator: stats_aggregator, db: db)
+  let ctx = web.Context(stats_aggregator: stats_aggregator, store: store)
 
   let handler = fn(req: Request(mist.Connection)) {
     case request.path_segments(req) {

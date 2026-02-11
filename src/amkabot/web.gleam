@@ -1,6 +1,6 @@
 import amkabot/domain
 import amkabot/stats
-import gleam/dynamic/decode
+
 import gleam/erlang/process.{type Subject}
 import gleam/float
 import gleam/int
@@ -8,11 +8,11 @@ import gleam/json
 import gleam/list
 import gleam/result
 import gleam/string
-import pog
+import amkabot/store
 import wisp.{type Request, type Response}
 
 pub type Context {
-  Context(stats_aggregator: Subject(stats.Message), db: pog.Connection)
+  Context(stats_aggregator: Subject(stats.Message), store: store.Store)
 }
 
 pub fn handle_request(req: Request, ctx: Context) -> Response {
@@ -24,6 +24,8 @@ pub fn handle_request(req: Request, ctx: Context) -> Response {
     ["leaderboard"] -> leaderboard_page(ctx)
     ["trader", address] -> trader_detail_page(ctx, address)
     ["api", "trader", address, "history"] -> trader_history_api(ctx, address)
+    ["api", "trader", address, "related"] -> trader_related_api(ctx, address)
+    ["api", "trader", address, "profile"] -> trader_profile_api(ctx, address)
     _ -> wisp.not_found()
   }
 }
@@ -318,6 +320,38 @@ fn trader_history_api(ctx: Context, address: String) -> Response {
       wisp.json_response(json.to_string(json_data), 200)
     }
     _ -> wisp.internal_server_error()
+  }
+}
+
+fn trader_related_api(ctx: Context, address: String) -> Response {
+  // Direct Store Access (No Actor needed for read-only graph query)
+  case store.get_related_traders(ctx.store, address) {
+    Ok(related_addresses) -> {
+      let json_data = json.object([
+        #("address", json.string(address)),
+        #("related_traders", json.array(related_addresses, of: json.string))
+      ])
+      wisp.json_response(json.to_string(json_data), 200)
+    }
+    Error(_) -> wisp.internal_server_error()
+  }
+}
+
+fn trader_profile_api(ctx: Context, address: String) -> Response {
+  case store.get_trader(ctx.store, address) {
+    Ok([trader]) -> {
+      let json_data = json.object([
+        #("address", json.string(trader.address)),
+        #("pnl", json.float(trader.total_pnl)),
+        #("roi", json.float(trader.roi)),
+        #("brier", json.float(trader.brier_score)),
+        #("preds", json.int(trader.prediction_count))
+      ])
+      wisp.json_response(json.to_string(json_data), 200)
+    }
+    Ok([]) -> wisp.not_found()
+    Error(_) -> wisp.internal_server_error()
+    Ok(_) -> wisp.internal_server_error() // Should be list of 1 or 0
   }
 }
 

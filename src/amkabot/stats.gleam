@@ -1,7 +1,6 @@
 import amkabot/domain.{type TradeActivity, Redeem}
-import gleam/dict.{type Dict}
-import gleam/dynamic/decode
 import gleam/erlang/process.{type Subject}
+import gleam/dict.{type Dict}
 import gleam/float
 import gleam/int
 import gleam/io
@@ -10,8 +9,7 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
 import gleam/result
-import gleam/string
-import pog.{type Connection}
+import amkabot/store.{type Store}
 
 pub type Prediction {
   Prediction(market_slug: String, price: Float, timestamp: Int)
@@ -46,7 +44,7 @@ pub type TraderSnapshot {
 
 pub type State {
   State(
-    db: Option(Connection),
+    store: Option(Store),
     traders: Dict(String, Stats),
     pending_predictions: Dict(String, List(Prediction)),
     subscribers: List(Subject(Stats)),
@@ -69,17 +67,17 @@ pub fn stats_to_json(stats: Stats) -> String {
   |> json.to_string
 }
 
-pub fn initial_state(db: Option(Connection)) -> State {
+pub fn initial_state(store: Option(Store)) -> State {
   State(
-    db: db,
+    store: store,
     traders: dict.new(),
     pending_predictions: dict.new(),
     subscribers: [],
   )
 }
 
-pub fn start(db: Connection) {
-  actor.new(initial_state(Some(db)))
+pub fn start(store: Store) {
+  actor.new(initial_state(Some(store)))
   |> actor.on_message(loop)
   |> actor.start()
 }
@@ -360,48 +358,29 @@ fn flush_internal(state: State) -> State {
       let updated_stats = Stats(..s, snapshots: new_snapshots)
 
       // Try DB persist if available
-      case state.db {
-        Some(db) -> {
-          let sql_traders =
-            "
-            INSERT INTO traders (address, total_pnl, roi, brier_score, markets_count)
-            VALUES ($1, $2, $3, $4, $5)
-            ON CONFLICT (address) DO UPDATE SET
-              total_pnl = EXCLUDED.total_pnl,
-              roi = EXCLUDED.roi,
-              brier_score = EXCLUDED.brier_score,
-              markets_count = EXCLUDED.markets_count,
-              last_updated_at = CURRENT_TIMESTAMP
-          "
-          let _ =
-            pog.query(sql_traders)
-            |> pog.parameter(pog.text(s.trader_id))
-            |> pog.parameter(pog.float(s.total_pnl))
-            |> pog.parameter(pog.float(s.roi))
-            |> pog.parameter(pog.float(avg_brier))
-            |> pog.parameter(pog.int(s.prediction_count))
-            |> pog.execute(db)
-
-          let sql_snapshots =
-            "
-              INSERT INTO trader_snapshots (address, snapshot_date, cumulative_brier, calibration_score, sharpness_score)
-              VALUES ($1, CURRENT_DATE, $2, $3, $4)
-              ON CONFLICT (address, snapshot_date) DO UPDATE SET
-                  cumulative_brier = EXCLUDED.cumulative_brier,
-                  calibration_score = EXCLUDED.calibration_score,
-                  sharpness_score = EXCLUDED.sharpness_score
-          "
-          let _ =
-            pog.query(sql_snapshots)
-            |> pog.parameter(pog.text(s.trader_id))
-            |> pog.parameter(pog.float(s.brier_sum))
-            |> pog.parameter(pog.float(avg_calib))
-            |> pog.parameter(pog.float(avg_sharp))
-            |> pog.execute(db)
-          Nil
+      let _ = case state.store {
+        Some(store) -> {
+           let _ = store.save_trader(
+             store,
+             s.trader_id,
+             s.total_pnl,
+             s.roi,
+             avg_brier,
+             s.prediction_count
+           )
+           
+           let _ = store.save_trader_snapshot(
+             store,
+             s.trader_id,
+             s.brier_sum,
+             avg_calib,
+             avg_sharp
+           )
+           Nil
         }
         None -> Nil
       }
+      // Return Nil explicitly if needed, but dict.insert returns a dict, so the previous expression was inside list.fold
 
       dict.insert(acc, s.trader_id, updated_stats)
     })
