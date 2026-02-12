@@ -49,9 +49,9 @@ pub fn main() {
   ], 30_000)
 
   // Define Schema
-  let assert Ok(_) = gleamdb.set_schema_with_timeout(db, "bet/id", fact.AttributeConfig(unique: True, component: False), 30_000)
-  let assert Ok(_) = gleamdb.set_schema_with_timeout(db, "trader/id", fact.AttributeConfig(unique: True, component: False), 30_000)
-  let assert Ok(_) = gleamdb.set_schema_with_timeout(db, "market/slug", fact.AttributeConfig(unique: True, component: False), 30_000)
+  let assert Ok(_) = gleamdb.set_schema_with_timeout(db, "bet/id", fact.AttributeConfig(unique: True, component: False, retention: fact.LatestOnly), 30_000)
+  let assert Ok(_) = gleamdb.set_schema_with_timeout(db, "trader/id", fact.AttributeConfig(unique: True, component: False, retention: fact.LatestOnly), 30_000)
+  let assert Ok(_) = gleamdb.set_schema_with_timeout(db, "market/slug", fact.AttributeConfig(unique: True, component: False, retention: fact.LatestOnly), 30_000)
 
   io.println("✅ GleamDB state reconstructed and connected to SQLite.")
 

@@ -11,6 +11,7 @@ import gleam/float
 import gleamdb
 import gleamdb/fact
 import amkabot/store.{type Store}
+import amkabot/gleam_store
 import gleam/int
 
 pub type Message {
@@ -93,6 +94,11 @@ fn loop(state: State, message: Message) -> actor.Next(State, Message) {
           })
           
           // Success: Schedule next poll in 10 seconds for stress test 🧙🏾‍♂️
+          io.println("🧠 Context Pulse: Searching for similar market activity...")
+          let query_vec = generate_mock_embedding("Will Trump win?")
+          let similar_bets = gleam_store.find_similar_bets(state.db, query_vec)
+          io.println("🧠 Context: Found " <> int.to_string(list.length(similar_bets)) <> " similar bets.")
+          
           process.send_after(state.self, 10_000, Poll)
         }
         Error(e) -> {
@@ -152,8 +158,25 @@ fn persist_activity(
       #(fact.Lookup(#("bet/id", fact.Str(bet_id))), "bet/outcome", fact.Str(outcome)),
       #(fact.Lookup(#("bet/id", fact.Str(bet_id))), "bet/amount", fact.Int(float_to_int(activity.size))),
       #(fact.Lookup(#("bet/id", fact.Str(bet_id))), "bet/price", fact.Int(float_to_int(activity.price *. 10000.0))), 
-      #(fact.Lookup(#("bet/id", fact.Str(bet_id))), "bet/timestamp", fact.Int(activity.timestamp))
+      #(fact.Lookup(#("bet/id", fact.Str(bet_id))), "bet/timestamp", fact.Int(activity.timestamp)),
+      #(fact.Lookup(#("bet/id", fact.Str(bet_id))), "bet/embedding", fact.Vec(generate_mock_embedding(activity.market_slug <> " " <> outcome)))
   ], 5000)
+}
+
+fn generate_mock_embedding(text: String) -> List(Float) {
+  let seed = string.length(text)
+  range(1, 16) 
+  |> list.map(fn(i) {
+    let x = int.to_float(seed + i)
+    x /. 100.0
+  })
+}
+
+fn range(start: Int, end: Int) -> List(Int) {
+  case start > end {
+    True -> []
+    False -> [start, ..range(start + 1, end)]
+  }
 }
 
 fn float_to_int(f: Float) -> Int {

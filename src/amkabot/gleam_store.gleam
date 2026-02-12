@@ -30,6 +30,23 @@ pub fn get_related_traders(db: gleamdb.Db, trader_id: String) -> List(String) {
   |> list.unique
 }
 
+pub fn find_similar_bets(db: gleamdb.Db, query_vec: List(Float)) -> List(String) {
+  let q = [
+     db_types.Similarity("sim_vec", query_vec, 0.7),
+     db_types.Positive(#(db_types.Var("bet"), "bet/embedding", db_types.Var("sim_vec"))),
+     db_types.Positive(#(db_types.Var("bet"), "bet/id", db_types.Var("bid")))
+  ]
+  
+  let result = gleamdb.query(db, q)
+  
+  list.filter_map(result, fn(binding) {
+    case dict.get(binding, "bid") {
+      Ok(fact.Str(id)) -> Ok(id)
+      _ -> Error(Nil)
+    }
+  })
+}
+
 pub fn adapter(conn: sqlight.Connection) -> storage.StorageAdapter {
   storage.StorageAdapter(
     init: fn() { init_schema(conn) },
