@@ -77,7 +77,16 @@ pub fn initial_state(store: Option(Store)) -> State {
 }
 
 pub fn start(store: Store) {
-  actor.new(initial_state(Some(store)))
+  start_with_timeout(store, 1000)
+}
+
+pub fn start_with_timeout(store: Store, timeout_ms: Int) {
+  actor.new_with_initialiser(timeout_ms, fn(self) {
+    let state = initial_state(Some(store))
+    actor.initialised(state)
+    |> actor.returning(self)
+    |> Ok
+  })
   |> actor.on_message(loop)
   |> actor.start()
 }
@@ -119,6 +128,71 @@ fn loop(state: State, message: Message) -> actor.Next(State, Message) {
         State(..state, subscribers: [subject, ..state.subscribers]),
       )
     }
+    Recover -> {
+      case state.store {
+        Some(store) -> {
+          let traders_result = store.load_all_traders(store)
+          let bets_result = store.load_all_bets(store)
+
+          case traders_result, bets_result {
+            Ok(traders), Ok(bets) -> {
+              io.println("🔄 Stats actor recovering state from DB...")
+              
+              // 1. Initialise stats from persisted traders
+              let initial_traders = list.fold(traders, dict.new(), fn(acc, t) {
+                dict.insert(acc, t.address, Stats(
+                  trader_id: t.address,
+                  total_pnl: t.total_pnl,
+                  roi: t.roi,
+                  brier_sum: t.brier_score *. int.to_float(t.prediction_count), // reconstruct sum
+                  prediction_count: t.prediction_count,
+                  total_invested: 0.0, // Will be partially updated by bets if we had buy volume
+                  calibration_sum: 0.0,
+                  sharpness_sum: 0.0,
+                  momentum_pnl: 0.0,
+                  last_activity_timestamp: 0,
+                  snapshots: [],
+                  recent_activity: [],
+                ))
+              })
+
+              // 2. Reconstruct pending predictions and invested amounts from bets
+              let #(new_traders, new_pending) = list.fold(bets, #(initial_traders, dict.new()), fn(acc, b) {
+                let #(trader_acc, pending_acc) = acc
+                
+                // Update invested amount
+                let stats = dict.get(trader_acc, b.trader_id) 
+                  |> result.unwrap(Stats(
+                    trader_id: b.trader_id, total_pnl: 0.0, roi: 0.0, brier_sum: 0.0, 
+                    prediction_count: 0, total_invested: 0.0, calibration_sum: 0.0, 
+                    sharpness_sum: 0.0, momentum_pnl: 0.0, last_activity_timestamp: 0, 
+                    snapshots: [], recent_activity: []
+                  ))
+                
+                let new_stats = Stats(..stats, total_invested: stats.total_invested +. b.amount)
+                
+                let new_pending_list = dict.get(pending_acc, b.trader_id) 
+                  |> result.unwrap([])
+                  |> list.prepend(Prediction(b.market_slug, b.price, b.timestamp))
+                
+                #(
+                  dict.insert(trader_acc, b.trader_id, new_stats),
+                  dict.insert(pending_acc, b.trader_id, new_pending_list)
+                )
+              })
+
+              io.println("✅ Stats recovery complete: " <> int.to_string(dict.size(new_traders)) <> " traders restored.")
+              actor.continue(State(..state, traders: new_traders, pending_predictions: new_pending))
+            }
+            _, _ -> {
+              io.println("⚠️ Stats recovery failed: could not load data.")
+              actor.continue(state)
+            }
+          }
+        }
+        None -> actor.continue(state)
+      }
+    }
   }
 }
 
@@ -132,6 +206,7 @@ pub type Message {
     reply_to: Subject(Result(#(List(TraderSnapshot), List(TradeActivity)), Nil)),
   )
   Subscribe(Subject(Stats))
+  Recover
 }
 
 

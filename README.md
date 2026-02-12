@@ -46,7 +46,7 @@ graph TD
 ```
 
 ### 🛡️ Database-Resilient Analytics
-The system is designed to be **Local-First**. Historical snapshots and recent activity logs are mirrored in the Stats Actor's memory. **GleamDB** provides a specialized graph layer on top of **SQLite**, allowing for complex relational queries (like Finding Related Traders) without the overhead of a heavy database server.
+The system is designed to be **Local-First**. Historical snapshots and recent activity logs are mirrored in the Stats Actor's memory. **GleamDB** provides a specialized **Silicon Saturation** layer on top of **SQLite**, using ETS-backed indices for O(1) concurrent reads. This allows Amkabot to perform multi-entity graph queries and skill evaluations without blocking ingestion.
 
 ## 🚀 Getting Started
 

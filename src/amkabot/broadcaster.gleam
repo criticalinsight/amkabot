@@ -18,7 +18,16 @@ pub type State {
 }
 
 pub fn start() {
-  actor.new(State(subscribers: [], buffer: dict.new()))
+  start_with_timeout(1000)
+}
+
+pub fn start_with_timeout(timeout_ms: Int) {
+  actor.new_with_initialiser(timeout_ms, fn(self) {
+    let state = State(subscribers: [], buffer: dict.new())
+    actor.initialised(state)
+    |> actor.returning(self)
+    |> Ok
+  })
   |> actor.on_message(loop)
   |> actor.start()
 }

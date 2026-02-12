@@ -1,5 +1,3 @@
-import amkabot/broadcaster
-import amkabot/ingestor
 import amkabot/stats
 import amkabot/web
 import gleam/erlang/process
@@ -10,11 +8,24 @@ import mist
 import amkabot/store
 import amkabot/gleam_store
 import gleamdb
+import gleamdb/transactor
 import gleamdb/fact
 import wisp
 import wisp/wisp_mist
+import amkabot/broadcaster
+import amkabot/singleton
+import amkabot/ingestor
 
 pub fn main() {
+  case singleton.acquire_lock("amkabot.lock") {
+    Ok(_) -> Nil
+    Error(err) -> {
+      io.println("❌ " <> err)
+      process.sleep(100)
+      panic as "Singleton violation"
+    }
+  }
+
   wisp.configure_logger()
   let secret_key_base =
     "an-extra-long-and-secure-secret-key-base-for-amkabot-64-bytes-long!!!"
@@ -24,29 +35,37 @@ pub fn main() {
   // Database Configuration
   let assert Ok(store) = store.init("amkabot.db")
   io.println("✅ SQLite store initialized.")
-  
-  // Initialize GleamDB
-  let assert store.Store(conn) = store
+
+  // Initialize GleamDB with Silicon Saturation (ETS)
+  let store.Store(conn) = store
   let adapter = gleam_store.adapter(conn)
-  let db = gleamdb.new_with_adapter(Some(adapter))
-  let assert Ok(_) = gleamdb.transact(db, [
-    #(fact.EntityId(0), "system/started_at", fact.Int(0)) // Timestamp TODO
-  ])
+  let assert Ok(db) = gleamdb.start_named("amkabot", Some(adapter))
+  io.println("✅ GleamDB transactor started with Silicon Saturation.")
+
+  io.println("✅ GleamDB transactor started with Silicon Saturation.")
+
+  let assert Ok(_) = gleamdb.transact_with_timeout(db, [
+    #(fact.Uid(fact.EntityId(0)), "system/started_at", fact.Int(0))
+  ], 30_000)
 
   // Define Schema
-  let assert Ok(_) = gleamdb.set_schema(db, "bet/id", fact.AttributeConfig(unique: True, component: False))
-  let assert Ok(_) = gleamdb.set_schema(db, "trader/id", fact.AttributeConfig(unique: True, component: False))
-  let assert Ok(_) = gleamdb.set_schema(db, "market/slug", fact.AttributeConfig(unique: True, component: False))
+  let assert Ok(_) = gleamdb.set_schema_with_timeout(db, "bet/id", fact.AttributeConfig(unique: True, component: False), 30_000)
+  let assert Ok(_) = gleamdb.set_schema_with_timeout(db, "trader/id", fact.AttributeConfig(unique: True, component: False), 30_000)
+  let assert Ok(_) = gleamdb.set_schema_with_timeout(db, "market/slug", fact.AttributeConfig(unique: True, component: False), 30_000)
 
-  io.println("✅ GleamDB initialized and connected to SQLite.")
+  io.println("✅ GleamDB state reconstructed and connected to SQLite.")
 
   // Start Analytics Engine
-  let assert Ok(stats_started) = stats.start(store)
+  let assert Ok(stats_started) = stats.start_with_timeout(store, 30_000)
   let stats_aggregator = stats_started.data
-  io.println("📊 Analytics engine (PState) initialized.")
+
+  // Recover State from DB
+  process.send(stats_aggregator, stats.Recover)
+
+  io.println("📊 Analytics engine (PState) initialized and recovery triggered.")
 
   // Start Broadcaster (Phase 8 Throttling Layer)
-  let assert Ok(broadcaster_started) = broadcaster.start()
+  let assert Ok(broadcaster_started) = broadcaster.start_with_timeout(30_000)
   let broadcaster_actor = broadcaster_started.data
 
   // Link Stats -> Broadcaster
@@ -70,7 +89,7 @@ pub fn main() {
   process.spawn(fn() { periodic_broadcast(broadcaster_actor) })
 
   // Start Ingestion Topology
-  let assert Ok(ingest_started) = ingestor.start(store, db, stats_aggregator)
+  let assert Ok(ingest_started) = ingestor.start_with_timeout(store, db, stats_aggregator, 30_000)
   process.send(ingest_started.data, ingestor.Poll)
   io.println("📡 Ingestion actor started and connected to analytics.")
 
@@ -116,7 +135,7 @@ pub fn main() {
   let assert Ok(_) =
     mist.new(handler)
     |> mist.port(8000)
-    |> mist.start
+    |> mist.start()
 
   io.println("🕸️  Web server listening on http://localhost:8000")
   process.sleep_forever()

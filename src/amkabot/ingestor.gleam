@@ -1,4 +1,4 @@
-import amkabot/domain.{type TradeActivity, activity_to_json}
+import amkabot/domain.{activity_to_json}
 import amkabot/polymarket
 import amkabot/stats
 import gleam/erlang/process
@@ -7,11 +7,11 @@ import gleam/json
 import gleam/list
 import gleam/otp/actor
 import gleam/string
-import gleam/int
 import gleam/float
 import gleamdb
 import gleamdb/fact
 import amkabot/store.{type Store}
+import gleam/int
 
 pub type Message {
   Poll
@@ -31,7 +31,16 @@ pub fn start(
   db: gleamdb.Db,
   stats_aggregator: process.Subject(stats.Message),
 ) {
-  actor.new_with_initialiser(1000, fn(self) {
+  start_with_timeout(store, db, stats_aggregator, 1000)
+}
+
+pub fn start_with_timeout(
+  store: Store,
+  db: gleamdb.Db,
+  stats_aggregator: process.Subject(stats.Message),
+  timeout_ms: Int,
+) {
+  actor.new_with_initialiser(timeout_ms, fn(self) {
     let state = State(store: store, db: db, self: self, stats_aggregator: stats_aggregator)
     actor.initialised(state)
     |> actor.returning(self)
@@ -82,27 +91,32 @@ fn loop(state: State, message: Message) -> actor.Next(State, Message) {
               }
             }
           })
+          
+          // Success: Schedule next poll in 10 seconds for stress test 🧙🏾‍♂️
+          process.send_after(state.self, 10_000, Poll)
         }
         Error(e) -> {
           io.println("❌ Leaderboard fetch error: " <> string.inspect(e))
+          // Failure: Backoff for 30 seconds before retrying
+          process.send_after(state.self, 30_000, Poll)
         }
       }
-
-      // Schedule next poll in 5 minutes
-      process.send_after(state.self, 300_000, Poll)
       actor.continue(state)
     }
   }
 }
 
-fn persist_activity(store: Store, db: gleamdb.Db, activity: TradeActivity) {
+fn persist_activity(
+  store: Store,
+  db: gleamdb.Db,
+  activity: domain.TradeActivity,
+) {
   let payload = activity_to_json(activity) |> json.to_string
 
-  // 1. Raw Event Log
+  // 1. Raw Event Log (SQLite Persistence)
   let _ = store.save_event(store, "polymarket", "trade_executed", payload)
 
-  // 2. Structured Bet for Graph
-  // defaulting outcome to "N/A" as it is not currently captured in TradeActivity
+  // 2. Structured Bet for Graph (SQLite Persistence)
   let outcome = "N/A" 
   let _ = store.save_bet(
     store,
@@ -114,82 +128,32 @@ fn persist_activity(store: Store, db: gleamdb.Db, activity: TradeActivity) {
     activity.timestamp
   )
   
-  // 3. GleamDB Graph
-  // Structure: 
-  //   Trader --[trader/id]--> (E1)
-  //   Market --[market/slug]--> (E2)
-  //   Bet --[bet/id]--> (E3)
-  //   (E3) --[bet/trader]--> (E1)
-  //   (E3) --[bet/market]--> (E2)
+  // 3. GleamDB Graph (Information Model)
+  // Use Lookup refs for declarative, idempotent upserts 🧙🏾‍♂️
+  // We don't need to manually check if they exist anymore.
   
-  // Ideally we use lookup refs to assert relationships without knowing EIDs.
-  // But GleamDB expects {Eid, Attr, Val}. 
-  // If we assert a fact with Lookup Ref as EID, does it create it?
-  // "Phase 8: Implement Lookup Refs (EID replacement)" -> Yes.
+  // A. Ensure Trader exists
+  let _ = gleamdb.transact_with_timeout(db, [
+    #(fact.Lookup(#("trader/id", fact.Str(activity.user))), "trader/id", fact.Str(activity.user)),
+  ], 5000)
+
+  // B. Ensure Market exists
+  let _ = gleamdb.transact_with_timeout(db, [
+    #(fact.Lookup(#("market/slug", fact.Str(activity.market_slug))), "market/slug", fact.Str(activity.market_slug)),
+  ], 5000)
+
+  // C. Create the Bet
+  let bet_id = activity.user <> "-" <> activity.market_slug <> "-" <> int.to_string(activity.timestamp)
   
-  // We need to ensure the entities exist or are created via the lookup ref.
-  // Asserting a fact checks if entity exists via index. If not? 
-  // Currently Lookup Ref works for determining EID of *existing* entity.
-  // Does it support upsert (create if missing)? 
-  // "Unification of EID" usually implies resolving.
-  // If I want to CREATE a trader if missing, I need to assert `trader/id`.
-  
-  let trader_ref = fact.Lookup(#("trader/id", fact.Str(activity.user)))
-  let market_ref = fact.Lookup(#("market/slug", fact.Str(activity.market_slug)))
-  
-  // We'll use a transaction that asserts identity for trader and market, then links them.
-  // Note: We need to give them temp IDs if creating new ones in same tx?
-  // Or if we use Lookup Ref as EID in the tuple?
-  // Current implementation of Transactor resolves Lookups. 
-  
-  // Let's assume we can use Lookup Ref as the EID in the Fact tuple.
-  // This asserts: "The entity identified by trader/id=X has trader/id=X" (idempotent setup)
-  
-  let _ = gleamdb.transact(db, [
-    // Ensure Trader exists
-    #(trader_ref, "trader/id", fact.Str(activity.user)),
-    
-    // Ensure Market exists
-    #(market_ref, "market/slug", fact.Str(activity.market_slug)),
-    
-    // Create Bet (using hash or random ID? Activity doesn't have ID?)
-    // activity.id isn't in snippet. Assuming hash of content.
-    // For now, let's use a temp ID for the new bet (negative integer).
-    #(fact.EntityId(-1), "bet/trader", fact.Str(activity.user)), // Linking by value? No, needs to link to Entity!
-    // Wait, GleamDB value type for Ref is... Int (EntityId).
-    // I can't look up the Entity ID of "user" inside the transaction easily unless I have a "Value Ref" type?
-    // GleamDB doesn't seem to have "Value Ref" yet (Phase 10 feature?).
-    // Phase 8 says "Implement Lookup Refs (EID replacement)". This usually means `#(Lookup("attr", "val"), "attr2", "val2")`.
-    // It doesn't necessarily mean `#(EntityId(1), "ref_attr", Lookup("attr", "val"))`.
-    // So I can't link to an entity by Lookup Ref in the *Value* position yet.
-    
-    // Workaround: 
-    // Two transactions? Or resolve first?
-    // Since this is dogfooding, this is a feature request! 
-    // "Support Lookup Refs in Value position for Ref attributes".
-    
-    // For now, I'll just store the string value "bet/trader_id" = "0x..." instead of a graph ref.
-    // Steps to true Graph:
-    // 1. Resolve Trader EID (or create)
-    // 2. Resolve Market EID (or create)
-    // 3. Create Bet EID linking 1 & 2.
-  ])
-  
-  // Doing it properly:
-  // Since I can't do it all in one TX without Value-Ref support, I'll do it sequentially for now
-  // or just store the flat data and query it.
-  // Let's store flat for MVP: 
-  // bet_entity: { bet/trader_id: "alice", bet/market_slug: "trump-2024" }
-  // We can still join on these strings!
-  
-  let _ = gleamdb.transact(db, [
-     #(fact.EntityId(-1), "bet/trader_id", fact.Str(activity.user)),
-     #(fact.EntityId(-1), "bet/market_slug", fact.Str(activity.market_slug)),
-     #(fact.EntityId(-1), "bet/amount", fact.Int(float_to_int(activity.usdc_size))),
-     #(fact.EntityId(-1), "bet/price", fact.Int(float_to_int(activity.price *. 100.0))), 
-     #(fact.EntityId(-1), "bet/timestamp", fact.Int(activity.timestamp))
-  ])
-  Nil
+  let _ = gleamdb.transact_with_timeout(db, [
+      #(fact.Lookup(#("bet/id", fact.Str(bet_id))), "bet/id", fact.Str(bet_id)),
+      #(fact.Lookup(#("bet/id", fact.Str(bet_id))), "bet/trader_id", fact.Str(activity.user)),
+      #(fact.Lookup(#("bet/id", fact.Str(bet_id))), "bet/market_slug", fact.Str(activity.market_slug)),
+      #(fact.Lookup(#("bet/id", fact.Str(bet_id))), "bet/outcome", fact.Str(outcome)),
+      #(fact.Lookup(#("bet/id", fact.Str(bet_id))), "bet/amount", fact.Int(float_to_int(activity.size))),
+      #(fact.Lookup(#("bet/id", fact.Str(bet_id))), "bet/price", fact.Int(float_to_int(activity.price *. 10000.0))), 
+      #(fact.Lookup(#("bet/id", fact.Str(bet_id))), "bet/timestamp", fact.Int(activity.timestamp))
+  ], 5000)
 }
 
 fn float_to_int(f: Float) -> Int {

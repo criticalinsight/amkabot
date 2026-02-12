@@ -92,6 +92,42 @@ pub fn save_bet(
   |> result.replace(Nil)
 }
 
+pub type Bet {
+  Bet(
+    trader_id: String,
+    market_slug: String,
+    outcome: String,
+    amount: Float,
+    price: Float,
+    timestamp: Int,
+  )
+}
+
+pub fn load_all_bets(store: Store) -> Result(List(Bet), sqlight.Error) {
+  let sql = "
+    SELECT trader_id, market_slug, outcome, amount, price, timestamp
+    FROM bets
+  "
+  let row_decoder = {
+    use trader_id <- decode.field(0, decode.string)
+    use market_slug <- decode.field(1, decode.string)
+    use outcome <- decode.field(2, decode.string)
+    use amount <- decode.field(3, decode.float)
+    use price <- decode.field(4, decode.float)
+    use timestamp <- decode.field(5, decode.int)
+    decode.success(Bet(
+      trader_id: trader_id,
+      market_slug: market_slug,
+      outcome: outcome,
+      amount: amount,
+      price: price,
+      timestamp: timestamp,
+    ))
+  }
+  
+  sqlight.query(sql, on: store.conn, with: [], expecting: row_decoder)
+}
+
 pub fn save_trader(
   store: Store, 
   address: String, 
@@ -175,6 +211,30 @@ pub fn get_trader(store: Store, address: String) -> Result(List(domain.Trader), 
   }
   
   sqlight.query(sql, on: store.conn, with: args, expecting: decoder)
+}
+
+pub fn load_all_traders(store: Store) -> Result(List(domain.Trader), sqlight.Error) {
+  let sql = "
+    SELECT address, total_pnl, roi, brier_score, markets_count
+    FROM traders
+  "
+  let decoder = {
+    use address <- decode.field(0, decode.string)
+    use total_pnl <- decode.field(1, decode.float)
+    use roi <- decode.field(2, decode.float)
+    use brier_score <- decode.field(3, decode.float)
+    use markets_count <- decode.field(4, decode.int)
+    decode.success(domain.Trader(
+      address: address,
+      total_pnl: total_pnl,
+      total_volume: 0.0,
+      roi: roi,
+      brier_score: brier_score,
+      prediction_count: markets_count
+    ))
+  }
+  
+  sqlight.query(sql, on: store.conn, with: [], expecting: decoder)
 }
 
 pub fn get_related_traders(store: Store, address: String) -> Result(List(String), sqlight.Error) {
